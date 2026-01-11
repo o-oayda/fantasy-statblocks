@@ -63,6 +63,10 @@ export function getMod(arg0: number) {
     return `${mod >= 0 ? "+" : "-"}${Math.abs(mod)}`;
 }
 
+export function getAbilityModifier(score?: number) {
+    return Math.floor((((score ?? 10) as number) - 10) / 2);
+}
+
 export function traitMapFrom(traits: Trait[] = []): Map<string, Trait> {
     return new Map(traits.map((t) => [t.name, t]));
 }

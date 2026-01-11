@@ -9,7 +9,7 @@ import {
 } from "obsidian";
 import { Layout5e } from "src/layouts/basic 5e/basic5e";
 import { MarkdownRenderChild } from "obsidian";
-import type { Monster, StatblockParameters, Trait } from "../../index";
+import type { ability, Monster, StatblockParameters, Trait } from "../../index";
 
 import Statblock from "./Statblock.svelte";
 import type StatBlockPlugin from "src/main";
@@ -25,10 +25,43 @@ import type {
     LayoutItem,
     StatblockItem
 } from "src/layouts/layout.types";
-import { append } from "src/util/util";
+import { append, getAbilityModifier } from "src/util/util";
 import { Linkifier } from "src/parser/linkify";
 import { Bestiary } from "src/bestiary/bestiary";
 import copy from "fast-copy";
+import { getProficiencyBonus } from "src/data/constants";
+import { SKILL_TO_ABILITY } from "src/data/skills";
+
+const ABILITIES: ability[] = [
+    "strength",
+    "dexterity",
+    "constitution",
+    "intelligence",
+    "wisdom",
+    "charisma"
+];
+
+const ABILITY_ALIASES: Record<string, ability> = {
+    str: "strength",
+    strength: "strength",
+    dex: "dexterity",
+    dexterity: "dexterity",
+    con: "constitution",
+    constitution: "constitution",
+    int: "intelligence",
+    intelligence: "intelligence",
+    wis: "wisdom",
+    wisdom: "wisdom",
+    cha: "charisma",
+    charisma: "charisma"
+};
+
+type ComputedEntrySpec = {
+    proficient?: boolean;
+    expertise?: boolean;
+    multiplier?: number;
+    bonus?: number;
+};
 
 type RendererParameters = {
     container: HTMLElement;
@@ -272,6 +305,19 @@ export default class StatBlockRenderer extends MarkdownRenderChild {
                                 )
                             });
                         }
+                        if (
+                            (property === "saves" ||
+                                property === "skillsaves") &&
+                            Array.isArray(built[property])
+                        ) {
+                            Object.assign(built, {
+                                [property]: this.normalizeSavingLikeEntries(
+                                    property as "saves" | "skillsaves",
+                                    built[property] as { [x: string]: any }[],
+                                    built
+                                )
+                            });
+                        }
                         break;
                     }
                     default: {
@@ -345,6 +391,257 @@ export default class StatBlockRenderer extends MarkdownRenderChild {
         }
 
         return ret;
+    }
+
+    private normalizeSavingLikeEntries(
+        property: "saves" | "skillsaves",
+        entries: { [x: string]: any }[],
+        creature: Partial<Monster>
+    ) {
+        const abilityScores = this.getAbilityScoreMap(creature);
+        const proficiency = getProficiencyBonus(creature.cr);
+        const isSkill = property === "skillsaves";
+        return entries.map((entry) =>
+            this.normalizeSaveEntry(entry, isSkill, abilityScores, proficiency)
+        );
+    }
+
+    private normalizeSaveEntry(
+        entry: any,
+        isSkill: boolean,
+        abilityScores: Record<ability, number>,
+        proficiency: number
+    ) {
+        if (entry == null) return entry;
+        if (typeof entry === "string") {
+            return isSkill
+                ? this.computeSkillFromString(entry, abilityScores, proficiency)
+                : this.computeAbilityFromString(
+                      entry,
+                      abilityScores,
+                      proficiency
+                  );
+        }
+        if (typeof entry !== "object") return entry;
+        if ("desc" in entry && entry.desc) return entry;
+        const legacyEntry = this.tryLegacyEntry(entry);
+        if (legacyEntry) return legacyEntry;
+        if (isSkill && "skill" in entry) {
+            return this.computeSkillFromObject(
+                entry,
+                abilityScores,
+                proficiency
+            );
+        }
+        if (!isSkill && ("ability" in entry || "save" in entry)) {
+            return this.computeAbilityFromObject(
+                entry,
+                abilityScores,
+                proficiency
+            );
+        }
+        return entry;
+    }
+
+    private tryLegacyEntry(entry: Record<string, any>) {
+        const keys = Object.keys(entry);
+        if (keys.length !== 1) return null;
+        const [key] = keys;
+        const value = this.toNumber(entry[key]);
+        if (value == null) return null;
+        return { [key]: value };
+    }
+
+    private computeSkillFromString(
+        value: string,
+        abilityScores: Record<ability, number>,
+        proficiency: number
+    ) {
+        const label = this.normalizeSkillLabel(value);
+        if (!label) return value;
+        const ability = this.getSkillAbility(label);
+        if (!ability) return value;
+        return this.buildComputedEntry(
+            label,
+            ability,
+            abilityScores,
+            proficiency,
+            { proficient: true }
+        );
+    }
+
+    private computeSkillFromObject(
+        entry: Record<string, any>,
+        abilityScores: Record<ability, number>,
+        proficiency: number
+    ) {
+        const label = this.normalizeSkillLabel(entry.skill);
+        if (!label) return entry;
+        const ability = this.getSkillAbility(
+            label,
+            typeof entry.ability === "string" ? entry.ability : undefined
+        );
+        const spec: ComputedEntrySpec = {
+            proficient: this.toBoolean(entry.proficient, true),
+            expertise: this.toBoolean(entry.expertise, false),
+            multiplier: this.extractMultiplier(entry),
+            bonus: this.extractBonus(entry)
+        };
+        const profBonus = this.resolveProficiency(entry, proficiency);
+        return this.buildComputedEntry(
+            label,
+            ability,
+            abilityScores,
+            profBonus,
+            spec
+        );
+    }
+
+    private computeAbilityFromString(
+        value: string,
+        abilityScores: Record<ability, number>,
+        proficiency: number
+    ) {
+        const ability = this.normalizeAbilityName(value);
+        if (!ability) return value;
+        return this.buildComputedEntry(
+            ability,
+            ability,
+            abilityScores,
+            proficiency,
+            { proficient: true }
+        );
+    }
+
+    private computeAbilityFromObject(
+        entry: Record<string, any>,
+        abilityScores: Record<ability, number>,
+        proficiency: number
+    ) {
+        const ability =
+            this.normalizeAbilityName(entry.ability) ??
+            this.normalizeAbilityName(entry.save);
+        if (!ability) return entry;
+        const spec: ComputedEntrySpec = {
+            proficient: this.toBoolean(entry.proficient, true),
+            expertise: this.toBoolean(entry.expertise, false),
+            multiplier: this.extractMultiplier(entry),
+            bonus: this.extractBonus(entry)
+        };
+        const profBonus = this.resolveProficiency(entry, proficiency);
+        return this.buildComputedEntry(
+            ability,
+            ability,
+            abilityScores,
+            profBonus,
+            spec
+        );
+    }
+
+    private buildComputedEntry(
+        label: string,
+        ability: ability | null,
+        abilityScores: Record<ability, number>,
+        proficiency: number,
+        spec: ComputedEntrySpec
+    ) {
+        const abilityMod =
+            ability != null ? getAbilityModifier(abilityScores[ability]) : 0;
+        const multiplier =
+            spec.multiplier ??
+            (spec.expertise ? 2 : spec.proficient === false ? 0 : 1);
+        const bonus = spec.bonus ?? 0;
+        return {
+            [label]: abilityMod + proficiency * multiplier + bonus
+        };
+    }
+
+    private getAbilityScoreMap(creature: Partial<Monster>) {
+        const scores: Record<ability, number> = {
+            strength: 10,
+            dexterity: 10,
+            constitution: 10,
+            intelligence: 10,
+            wisdom: 10,
+            charisma: 10
+        };
+        const stats = Array.isArray(creature.stats) ? creature.stats : [];
+        for (let index = 0; index < ABILITIES.length; index++) {
+            const value = stats[index];
+            if (typeof value === "number") {
+                scores[ABILITIES[index]] = value;
+            }
+        }
+        return scores;
+    }
+
+    private normalizeSkillLabel(skill?: string) {
+        if (!skill) return "";
+        return skill.toString().trim().toLowerCase().replace(/\s+/g, " ");
+    }
+
+    private getSkillAbility(skill: string, override?: string) {
+        if (override) {
+            const normalized = this.normalizeAbilityName(override);
+            if (normalized) return normalized;
+        }
+        return SKILL_TO_ABILITY[skill] ?? null;
+    }
+
+    private normalizeAbilityName(value?: string) {
+        if (!value) return null;
+        let key = value.toString().trim().toLowerCase();
+        key = key.replace(/\s+saving throw$/, "").replace(/\s+save$/, "");
+        return ABILITY_ALIASES[key] ?? null;
+    }
+
+    private resolveProficiency(entry: Record<string, any>, fallback: number) {
+        const override =
+            this.toNumber(entry.proficiencyBonus ?? entry.pb) ?? null;
+        return override ?? fallback;
+    }
+
+    private extractMultiplier(entry: Record<string, any>) {
+        const multiplier =
+            this.toNumber(entry.proficiencyMultiplier ?? entry.multiplier) ??
+            null;
+        if (multiplier != null) return multiplier;
+        if (
+            entry.half === true ||
+            entry.halfProficient === true ||
+            entry.halfProficiency === true
+        ) {
+            return 0.5;
+        }
+        return undefined;
+    }
+
+    private extractBonus(entry: Record<string, any>) {
+        const fields = ["bonus", "mod", "modifier", "adjustment"];
+        for (const field of fields) {
+            const value = this.toNumber(entry[field]);
+            if (value != null) {
+                return value;
+            }
+        }
+        return 0;
+    }
+
+    private toNumber(value: any) {
+        if (value == null || value === "") return null;
+        const parsed = Number(value);
+        return isNaN(parsed) ? null : parsed;
+    }
+
+    private toBoolean(value: any, fallback: boolean) {
+        if (value == null) return fallback;
+        if (typeof value === "boolean") return value;
+        if (typeof value === "string") {
+            const normalized = value.trim().toLowerCase();
+            if (["true", "yes", "1"].includes(normalized)) return true;
+            if (["false", "no", "0"].includes(normalized)) return false;
+        }
+        return Boolean(value);
     }
 
     setCreature(

@@ -194,6 +194,34 @@ export const CR: { [key: string]: CR } = {
     }
 };
 
+export function getProficiencyBonus(cr?: string | number): number {
+    if (cr == null || cr === "") return 0;
+    const key = typeof cr === "number" ? `${cr}` : `${cr}`.trim();
+    const crEntry = CR[key];
+    let crValue = crEntry?.value ?? null;
+    if (crValue == null) {
+        if (typeof cr === "number") {
+            crValue = cr;
+        } else if (key.includes("/")) {
+            const [numerator, denominator] = key.split("/");
+            const num = Number(numerator);
+            const den = Number(denominator);
+            if (!isNaN(num) && !isNaN(den) && den !== 0) {
+                crValue = num / den;
+            }
+        } else {
+            const parsed = Number(key.replace(",", ""));
+            if (!isNaN(parsed)) {
+                crValue = parsed;
+            }
+        }
+    }
+    if (crValue == null || isNaN(crValue)) {
+        return 0;
+    }
+    return Math.max(Math.floor(2 + (crValue - 1) / 4), 2);
+}
+
 export const DiceBySize: { [key: string]: number } = {
     tiny: 4,
     small: 6,
