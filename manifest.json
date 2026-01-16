@@ -1,6 +1,6 @@
 {
-    "id": "obsidian-5e-statblocks",
-    "name": "Fantasy Statblocks",
+    "id": "obsidian-5e-statblocks-custom",
+    "name": "Fantasy Statblocks Custom",
     "version": "4.10.2",
     "description": "Create Fantasy Statblocks in Obsidian.md",
     "minAppVersion": "0.12.0",
